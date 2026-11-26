@@ -1,0 +1,7 @@
+PASS  GET / -> HTML da loja
+PASS  GET /api/health/ready -> {"ready":true,"database":true}
+PASS  GET /api/products -> 6 produtos
+PASS  GET /api/orders -> 0 pedidos no histórico
+PASS  GET /api/metrics -> 404 (rota inexistente)
+PASS  GET /api/lab/cpu -> 404 (rota inexistente)
+SMOKE_RESULT=PASS

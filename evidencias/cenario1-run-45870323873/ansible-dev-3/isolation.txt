@@ -1,0 +1,13 @@
+1) VM do banco sem IP público:
+   PASS  db_public_ip vazio
+2) Porta 27017 não aceita conexões pela internet (IP público da aplicação):
+   PASS  conexão recusada/expirada em 18.217.103.51:27017
+3) Regras de entrada do Security Group do banco (origem deve ser o SG da aplicação):
+---------------------------------------------------------------------------------------------------------------------
+|                                            DescribeSecurityGroupRules                                             |
++-------+--------+-------+-----------------------+------------------------------------------------------------------+
+|  22   |  22    |  None |  sg-0f1a786ccf49b7723 |  SSH administrativo via salto (ProxyJump) pela VM da aplicacao   |
+|  27017|  27017 |  None |  sg-0f1a786ccf49b7723 |  MongoDB somente a partir da VM da aplicacao (rede privada)      |
++-------+--------+-------+-----------------------+------------------------------------------------------------------+
+   PASS  nenhuma regra de entrada por CIDR no banco
+ISOLATION_RESULT=PASS

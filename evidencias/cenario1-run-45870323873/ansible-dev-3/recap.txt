@@ -1,0 +1,4 @@
+PLAY RECAP *********************************************************************
+kubeshop-dev-app           : ok=62   changed=27   unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+kubeshop-dev-db            : ok=73   changed=32   unreachable=0    failed=0    skipped=3    rescued=0    ignored=0   
+
