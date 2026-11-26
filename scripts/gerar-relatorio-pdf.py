@@ -22,7 +22,7 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph, Simpl
                                 Spacer, Table, TableStyle, XPreformatted)
 
 # ----------------------------------------------------------------------------- dados
-INTEGRANTES = ["Joao Victor Godoy"]
+INTEGRANTES = ["Joao Victor Godoy", "Mohammed Jebai"]
 REPO = "https://github.com/Gordoy22/kubeshop-infra"
 APP_REPO = "https://github.com/LaercioMLB/kube-shop-v2"
 LOJA = "http://18.217.103.51"
