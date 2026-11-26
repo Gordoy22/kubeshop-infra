@@ -69,7 +69,7 @@ Pipeline **2** com os mesmos parâmetros do Cenário 2.
 | `list-backups` | tabela com a chave e `orders=N` | ✅ [run 45876254224](https://github.com/Gordoy22/kubeshop-infra/actions/runs/45876254224): `dev/kubeshop-dev-20261126T182734Z.archive.gz` · 1 pedido · 492 B |
 | `restore` (`latest`, `RESTAURAR`) | `RESTORE_OK … pedidos_backup=N pedidos_depois=N` | ✅ [run 45876364892](https://github.com/Gordoy22/kubeshop-infra/actions/runs/45876364892): `RESTORE_OK … sha256=OK pedidos_antes=2 pedidos_backup=1 pedidos_depois=1`. Na loja sobrou só o pedido `…11ed462`. |
 | backup automático | `logs service=backup` mostra a execução diária do timer (no dia seguinte) | ⏳ timer ativo (próxima execução às 03:00 UTC). Conferir com `logs service=backup` no dia 27/11. |
-| `logs` | logs JSON da API e do MongoDB sem credenciais | ⏳ executar antes da apresentação |
+| `logs` | logs JSON da API e do MongoDB sem credenciais | ✅ [run 45881431019](https://github.com/Gordoy22/kubeshop-infra/actions/runs/45881431019): logs do frontend, da API (uma linha JSON por requisição, com requestId/rota/status) e do MongoDB; busca por senhas/URIs com credenciais no log: 0 ocorrências |
 
 ### Desativação
 
