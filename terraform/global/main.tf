@@ -15,7 +15,7 @@ resource "aws_s3_bucket" "backups" {
 
   tags = {
     Name    = local.backup_bucket
-    Purpose = "Backups mongodump do KubeShop (todos os ambientes, prefixo por ambiente)"
+    Purpose = "kubeshop-mongodump-backups"
   }
 }
 
