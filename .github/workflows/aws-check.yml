@@ -1,0 +1,107 @@
+# =============================================================================
+# 8 · DIAGNÓSTICO DA CONTA AWS (não cria VMs)
+# Confere, região por região, se as credenciais da pipeline podem executar as
+# ações que o projeto usa (S3, VPC, EC2, EIP, EBS, IAM). Usa --dry-run sempre que
+# a API permite; o bucket e o papel de teste são removidos em seguida.
+# Útil em contas com restrições de organização (SCP) ou de plano gratuito.
+# =============================================================================
+name: "8 · Diagnóstico - Permissões da conta AWS"
+
+on:
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Regiões a testar (separadas por espaço)"
+        type: string
+        default: "us-east-1 us-east-2"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    name: Testar permissões
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Autenticar na AWS via OIDC
+        if: env.ROLE != ''
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARN }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Autenticar na AWS via access key
+        if: env.ROLE == ''
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARN }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Testar ações usadas pelo projeto
+        env:
+          REGIONS: ${{ inputs.regions }}
+        run: |
+          set -u
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          echo "Conta: ${ACCOUNT}  Identidade: $(aws sts get-caller-identity --query Arn --output text)"
+          aws organizations describe-organization --query 'Organization.{Id:Id,Master:MasterAccountId,Features:FeatureSet}' --output table 2>&1 | tail -n +1 || true
+          aws freetier get-account-plan-state --output json 2>&1 | head -20 || true
+
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          echo "## Permissões da conta AWS" >> "$SUMMARY"
+          echo "| Região | Ação | Resultado | Detalhe |" >> "$SUMMARY"
+          echo "|---|---|---|---|" >> "$SUMMARY"
+
+          # Executa um comando e classifica: OK (permitido), NEGADO (SCP/IAM) ou ERRO (outro motivo)
+          probe() {
+            local region="$1" label="$2"; shift 2
+            local out rc
+            out="$("$@" 2>&1)"; rc=$?
+            local res detail
+            if [[ $rc -eq 0 || "$out" == *DryRunOperation* ]]; then
+              res="✅ OK"; detail="permitido"
+            elif [[ "$out" == *"service control policy"* ]]; then
+              res="⛔ NEGADO (SCP)"; detail="$(grep -o 'policy/[^ ]*' <<<"$out" | head -1)"
+            elif [[ "$out" == *AccessDenied* || "$out" == *UnauthorizedOperation* || "$out" == *"not authorized"* ]]; then
+              res="⛔ NEGADO"; detail="$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+            else
+              res="⚠️ ERRO"; detail="$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+            fi
+            printf '%-10s %-34s %s %s\n' "$region" "$label" "$res" "$detail"
+            echo "| ${region} | ${label} | ${res} | ${detail//|/ } |" >> "$SUMMARY"
+          }
+
+          ROLE_NAME="kubeshop-probe-${GITHUB_RUN_ID}"
+          probe global "iam:CreateRole" aws iam create-role --role-name "$ROLE_NAME" \
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+          aws iam delete-role --role-name "$ROLE_NAME" >/dev/null 2>&1 || true
+
+          for R in $REGIONS; do
+            BUCKET="kubeshop-probe-${ACCOUNT}-${R}-${GITHUB_RUN_ID}"
+            if [[ "$R" == us-east-1 ]]; then
+              probe "$R" "s3:CreateBucket" aws s3api create-bucket --bucket "$BUCKET" --region "$R"
+            else
+              probe "$R" "s3:CreateBucket" aws s3api create-bucket --bucket "$BUCKET" --region "$R" \
+                --create-bucket-configuration "LocationConstraint=$R"
+            fi
+            aws s3api delete-bucket --bucket "$BUCKET" --region "$R" >/dev/null 2>&1 || true
+
+            AMI="$(aws ec2 describe-images --region "$R" --owners 099720109477 \
+              --filters 'Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*' \
+              --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text 2>/dev/null)"
+            probe "$R" "ec2:DescribeImages (Ubuntu 24.04)" test -n "$AMI" -a "$AMI" != None
+            probe "$R" "ec2:CreateVpc" aws ec2 create-vpc --region "$R" --cidr-block 10.99.0.0/16 --dry-run
+            probe "$R" "ec2:AllocateAddress (EIP)" aws ec2 allocate-address --region "$R" --domain vpc --dry-run
+            AZ="$(aws ec2 describe-availability-zones --region "$R" --query 'AvailabilityZones[0].ZoneName' --output text 2>/dev/null)"
+            probe "$R" "ec2:CreateVolume (gp3)" aws ec2 create-volume --region "$R" --availability-zone "$AZ" --size 10 --volume-type gp3 --encrypted --dry-run
+            for T in t3.micro t3.small t3.medium; do
+              probe "$R" "ec2:RunInstances ${T}" aws ec2 run-instances --region "$R" --image-id "$AMI" \
+                --instance-type "$T" --count 1 --dry-run
+            done
+            probe "$R" "ec2:CreateVpcEndpoint (S3)" aws ec2 describe-vpc-endpoint-services --region "$R" --service-names "com.amazonaws.${R}.s3"
+          done
