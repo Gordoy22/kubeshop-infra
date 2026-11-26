@@ -1,0 +1,30 @@
+---
+# Restauração a partir do S3. Parâmetro backup_key: "latest" ou a chave exibida no backup.
+# AÇÃO DESTRUTIVA: substitui os pedidos atuais pelos do backup (a pipeline exige confirmação).
+- name: Restaurar o MongoDB
+  hosts: db
+  become: true
+  vars:
+    backup_key: latest
+  tasks:
+    - name: Validar chave do backup
+      ansible.builtin.assert:
+        that: backup_key == 'latest' or backup_key is match('^[a-z]+/kubeshop-[a-z]+-[0-9]{8}T[0-9]{6}Z\.archive\.gz$')
+        fail_msg: "backup_key inválida: use 'latest' ou <ambiente>/kubeshop-<ambiente>-AAAAMMDDTHHMMSSZ.archive.gz"
+        quiet: true
+
+    - name: Executar kubeshop-restore (confere SHA-256 e quantidade de pedidos)
+      ansible.builtin.command:
+        argv: [/usr/local/bin/kubeshop-restore, "{{ backup_key }}"]
+      register: restore_run
+      changed_when: true
+
+    - name: Resultado da restauração
+      ansible.builtin.debug:
+        msg: "{{ restore_run.stdout_lines | select('match', '^RESTORE_') | list }}"
+
+- name: Verificar a aplicação após a restauração
+  hosts: all
+  become: true
+  roles:
+    - role: verify

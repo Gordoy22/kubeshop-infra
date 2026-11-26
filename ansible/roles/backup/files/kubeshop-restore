@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# KubeShop - restauração do MongoDB a partir do S3 (gerenciado pelo Ansible).
+# Uso: kubeshop-restore [latest | <ambiente>/kubeshop-<amb>-<data>.archive.gz]
+# Passos: baixa o backup e seus metadados, confere o SHA-256, restaura o banco
+# kubeshop (--drop substitui as coleções) e confere a quantidade de pedidos.
+# shellcheck disable=SC2154  # variáveis vêm de /etc/kubeshop/backup.env
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/kubeshop/backup.env
+export AWS_REGION AWS_DEFAULT_REGION
+
+KEY="${1:-latest}"
+if [[ "${KEY}" == "latest" ]]; then
+  KEY="$(aws s3api list-objects-v2 --bucket "${BACKUP_BUCKET}" --prefix "${ENV_NAME}/" \
+    --query 'Contents[?ends_with(Key, `.archive.gz`)].Key' --output text \
+    | tr '\t' '\n' | sort | tail -n1)"
+fi
+if [[ ! "${KEY}" =~ ^${ENV_NAME}/kubeshop-${ENV_NAME}-[0-9]{8}T[0-9]{6}Z\.archive\.gz$ ]]; then
+  echo "RESTORE_FAIL chave de backup inválida ou inexistente: '${KEY}'" >&2
+  exit 2
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "${WORK}"' EXIT
+umask 077
+aws s3 cp "s3://${BACKUP_BUCKET}/${KEY}" "${WORK}/backup.archive.gz" --only-show-errors
+aws s3 cp "s3://${BACKUP_BUCKET}/${KEY%.archive.gz}.json" "${WORK}/meta.json" --only-show-errors
+
+EXPECTED_SHA="$(jq -r .sha256 "${WORK}/meta.json")"
+EXPECTED_ORDERS="$(jq -r .orders "${WORK}/meta.json")"
+ACTUAL_SHA="$(sha256sum "${WORK}/backup.archive.gz" | cut -d' ' -f1)"
+if [[ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]]; then
+  echo "RESTORE_FAIL integridade: sha256 esperado ${EXPECTED_SHA}, obtido ${ACTUAL_SHA}" >&2
+  exit 3
+fi
+
+BEFORE="$(docker exec mongodb mongosh --quiet --file /opt/count-orders.js | tail -n1)"
+
+docker exec -i mongodb mongorestore \
+  --config=/run/secrets/mongotools.yaml \
+  --username "${MONGO_ROOT_USER}" --authenticationDatabase admin \
+  --nsInclude "${MONGO_DATABASE}.*" --drop --archive --gzip --quiet < "${WORK}/backup.archive.gz"
+
+AFTER="$(docker exec mongodb mongosh --quiet --file /opt/count-orders.js | tail -n1)"
+
+if [[ "${AFTER}" != "${EXPECTED_ORDERS}" ]]; then
+  echo "RESTORE_FAIL conferência: esperado ${EXPECTED_ORDERS} pedidos, encontrado ${AFTER}" >&2
+  exit 4
+fi
+echo "RESTORE_OK key=${KEY} sha256=OK pedidos_antes=${BEFORE} pedidos_backup=${EXPECTED_ORDERS} pedidos_depois=${AFTER}"

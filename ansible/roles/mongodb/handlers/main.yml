@@ -1,0 +1,7 @@
+---
+# Só reinicia um contêiner que já existia antes desta execução: reiniciar durante a
+# primeira inicialização interromperia a criação do usuário da aplicação.
+- name: Reiniciar mongodb
+  ansible.builtin.command: docker restart mongodb
+  changed_when: true
+  when: mongo_preexisting.exists | default(false)

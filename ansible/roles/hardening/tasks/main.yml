@@ -1,0 +1,36 @@
+---
+# REQ-04: acesso administrativo restrito (somente chave, sem root, sem senha).
+- name: Aplicar política de SSH do projeto
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-kubeshop.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Gerenciado pelo Ansible (kubeshop-infra). Não editar manualmente.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      X11Forwarding no
+      MaxAuthTries 3
+      LoginGraceTime 30
+      AllowUsers {{ ansible_user }}
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Recarregar ssh
+
+- name: Garantir atualizações automáticas de segurança (unattended-upgrades)
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    lock_timeout: 300
+
+- name: Configurar atualizações automáticas de segurança
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";

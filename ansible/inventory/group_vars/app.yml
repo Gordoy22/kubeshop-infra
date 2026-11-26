@@ -1,0 +1,7 @@
+---
+# VM da aplicação: Nginx (frontend React) + API Node.js/Express.
+http_port: 80
+app_network: kubeshop_web
+api_image: "{{ docker_image }}-api:{{ docker_tag }}"
+frontend_image: "{{ docker_image }}-frontend:{{ docker_tag }}"
+api_uid: 1000  # usuário "node" da imagem da API (lê o arquivo de senha)

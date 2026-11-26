@@ -1,0 +1,49 @@
+---
+# Valores padrão. A pipeline sobrescreve com -e (maior precedência) a cada execução.
+# SEGREDOS NÃO FICAM AQUI: são lidos de variáveis de ambiente preenchidas pelos
+# GitHub Secrets apenas durante a execução.
+
+project: kubeshop
+env_name: dev
+
+# ---- Parâmetros da pipeline (PM-04)
+update_os: false
+extra_packages: ""
+docker_image: ghcr.io/example/kubeshop  # vira <docker_image>-api e <docker_image>-frontend
+docker_tag: "1.0.0"
+force_pull: false
+
+# ---- Pacotes base mantidos em todas as VMs
+base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - unzip
+  - jq
+  - net-tools
+  - dnsutils
+  - netcat-openbsd
+  - python3-requests
+
+# ---- Banco
+mongo_image: mongo
+mongo_tag: "8.0.17"  # mesma versão validada no compose.yaml original
+mongo_database: kubeshop
+mongo_app_user: kubeshop
+mongo_root_user: admin
+mongo_wiredtiger_cache_gb: "0.25"
+
+# ---- Diretórios nas VMs
+kubeshop_dir: /opt/kubeshop
+secrets_dir: /opt/kubeshop/secrets
+mongo_data_mount: /data/mongo
+
+# ---- Segredos (lidos do ambiente do runner; nunca versionados)
+mongo_root_password: "{{ lookup('ansible.builtin.env', 'MONGO_ROOT_PASSWORD') }}"
+mongo_app_password: "{{ lookup('ansible.builtin.env', 'MONGO_APP_PASSWORD') }}"
+registry_username: "{{ lookup('ansible.builtin.env', 'REGISTRY_USERNAME') }}"
+registry_password: "{{ lookup('ansible.builtin.env', 'REGISTRY_PASSWORD') }}"
+
+# ---- Docker
+docker_log_max_size: "10m"
+docker_log_max_file: "3"

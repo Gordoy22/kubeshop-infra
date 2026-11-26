@@ -1,0 +1,30 @@
+---
+# Consulta de saúde e diagnóstico (somente leitura).
+- name: Consulta de saúde do KubeShop
+  hosts: all
+  become: true
+  tasks:
+    - name: Executar verificações
+      ansible.builtin.include_role:
+        name: verify
+
+    - name: Coletar recursos da VM (CPU, memória, disco)
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "uptime : $(uptime -p)"
+        echo "load   : $(cut -d' ' -f1-3 /proc/loadavg)"
+        free -h | awk 'NR<=2'
+        df -h / {{ mongo_data_mount if 'db' in group_names else '' }} | awk '{print}'
+      args:
+        executable: /bin/bash
+      register: health_resources
+      changed_when: false
+
+    - name: Coletar estado dos contêineres
+      ansible.builtin.command: docker ps --format 'table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Image{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Ports{{ "}}" }}'
+      register: health_ps
+      changed_when: false
+
+    - name: Relatório de saúde
+      ansible.builtin.debug:
+        msg: "{{ health_resources.stdout_lines + [''] + health_ps.stdout_lines }}"

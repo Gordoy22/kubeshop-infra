@@ -1,0 +1,84 @@
+---
+# Instala o Docker Engine oficial somente se ainda não estiver presente (idempotente).
+- name: Remover pacotes Docker não oficiais conflitantes
+  ansible.builtin.apt:
+    name: [docker.io, docker-compose, docker-doc, podman-docker]
+    state: absent
+    lock_timeout: 300
+
+- name: Criar diretório de chaves do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Baixar chave GPG oficial da Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configurar repositório oficial da Docker
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable
+    filename: docker
+    state: present
+    update_cache: true
+
+- name: Instalar Docker Engine, CLI, containerd, Compose e SDK Python
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+      - python3-docker
+    state: present
+    lock_timeout: 300
+
+- name: Configurar daemon do Docker (rotação de logs, live-restore)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ docker_daemon_config | to_nice_json }}\n"
+  vars:
+    docker_daemon_config:
+      log-driver: json-file
+      log-opts:
+        max-size: "{{ docker_log_max_size }}"
+        max-file: "{{ docker_log_max_file }}"
+      live-restore: true
+  notify: Reiniciar docker
+
+- name: Garantir Docker ativo e habilitado no boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Adicionar usuário administrativo ao grupo docker
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+
+- name: Aplicar reinício do Docker agora, se a configuração mudou
+  ansible.builtin.meta: flush_handlers
+
+- name: Coletar versão do Docker
+  ansible.builtin.command: docker version --format '{{ "{{" }} .Server.Version {{ "}}" }}'
+  register: docker_version
+  changed_when: false
+
+- name: Registrar versão do Docker
+  ansible.builtin.debug:
+    msg: "Docker Engine {{ docker_version.stdout }} em {{ inventory_hostname }}"

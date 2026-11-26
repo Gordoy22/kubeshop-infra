@@ -1,0 +1,176 @@
+---
+# Contêineres da aplicação KubeShop a partir das imagens publicadas pelo CI/CD da aplicação
+# (sem alterar código nem visual). Equivale aos serviços "frontend" e "api" do compose.yaml
+# original, adaptados para o banco em outro host (MONGO_HOST = IP privado da VM do banco).
+- name: Validar parâmetros da imagem
+  ansible.builtin.assert:
+    that:
+      - docker_image is match('^[a-z0-9]+([._/:-][a-z0-9]+)*$')
+      - docker_tag | string is match('^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$')
+      - mongo_app_password | length >= 16
+    fail_msg: "docker_image/docker_tag inválidos ou secret MONGO_APP_PASSWORD ausente."
+    quiet: true
+  no_log: true
+
+- name: Criar diretórios do projeto
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ kubeshop_dir }}", mode: "0755" }
+    - { path: "{{ secrets_dir }}", mode: "0711" }
+
+- name: Gravar senha do usuário da aplicação no MongoDB (legível só pelo usuário da API)
+  ansible.builtin.copy:
+    dest: "{{ secrets_dir }}/mongo-app-password"
+    content: "{{ mongo_app_password }}\n"
+    owner: "{{ api_uid }}"
+    group: "{{ api_uid }}"
+    mode: "0400"
+  no_log: true
+  register: api_secret
+
+- name: Verificar imagens já presentes na VM
+  community.docker.docker_image_info:
+    name:
+      - "{{ api_image }}"
+      - "{{ frontend_image }}"
+  register: local_images
+
+- name: Decidir se é preciso baixar imagens
+  ansible.builtin.set_fact:
+    containers_need_pull: "{{ (local_images.images | length) < 2 or (force_pull | bool) or (docker_tag == 'latest') }}"
+
+- name: Autenticar no registro de imagens (somente quando precisa baixar)
+  community.docker.docker_login:
+    registry_url: "{{ docker_image.split('/')[0] }}"
+    username: "{{ registry_username }}"
+    password: "{{ registry_password }}"
+  no_log: true
+  when:
+    - containers_need_pull | bool
+    - registry_password | length > 0
+
+- name: Baixar imagens da aplicação {{ docker_tag }}
+  community.docker.docker_image_pull:
+    name: "{{ item }}"
+    pull: "{{ 'always' if (force_pull | bool or docker_tag == 'latest') else 'not_present' }}"
+  loop:
+    - "{{ api_image }}"
+    - "{{ frontend_image }}"
+  register: images_pulled
+  when: containers_need_pull | bool
+
+- name: Encerrar sessão no registro (não deixar token na VM)
+  community.docker.docker_login:
+    registry_url: "{{ docker_image.split('/')[0] }}"
+    state: absent
+  when:
+    - containers_need_pull | bool
+    - registry_password | length > 0
+
+- name: Criar rede Docker da aplicação
+  community.docker.docker_network:
+    name: "{{ app_network }}"
+    state: present
+
+- name: Executar contêiner da API (Node.js/Express)
+  community.docker.docker_container:
+    name: api  # o nginx.conf original encaminha /api para "api:3000"
+    image: "{{ api_image }}"
+    pull: never
+    state: started
+    restart: "{{ api_secret is changed }}"
+    restart_policy: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opts:
+      - no-new-privileges:true
+    stop_timeout: 20
+    env:
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      APP_VERSION: "{{ docker_tag | string }}"
+      MONGO_HOST: "{{ db_private_ip }}"
+      MONGO_PORT: "27017"
+      MONGO_DATABASE: "{{ mongo_database }}"
+      MONGO_AUTH_SOURCE: "{{ mongo_database }}"
+      MONGO_USERNAME: "{{ mongo_app_user }}"
+      MONGO_PASSWORD_FILE: /run/secrets/mongo_app_password
+    volumes:
+      - "{{ secrets_dir }}/mongo-app-password:/run/secrets/mongo_app_password:ro"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health/ready',{signal:AbortSignal.timeout(2500)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+    log_driver: json-file
+    log_options:
+      max-size: "{{ docker_log_max_size }}"
+      max-file: "{{ docker_log_max_file }}"
+    networks:
+      - name: "{{ app_network }}"
+
+# Ordem de inicialização: o frontend só sobe com a API saudável (como o depends_on original).
+- name: Aguardar API saudável (inclui conexão com o MongoDB pela rede privada)
+  community.docker.docker_container_info:
+    name: api
+  register: api_info
+  until: api_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 30
+  delay: 5
+
+- name: Executar contêiner do frontend (React servido pelo Nginx)
+  community.docker.docker_container:
+    name: frontend
+    image: "{{ frontend_image }}"
+    pull: never
+    state: started
+    restart_policy: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opts:
+      - no-new-privileges:true
+    published_ports:
+      - "{{ http_port }}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    log_driver: json-file
+    log_options:
+      max-size: "{{ docker_log_max_size }}"
+      max-file: "{{ docker_log_max_file }}"
+    networks:
+      - name: "{{ app_network }}"
+
+- name: Aguardar frontend saudável
+  community.docker.docker_container_info:
+    name: frontend
+  register: frontend_info
+  until: frontend_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 20
+  delay: 3
+
+- name: Registrar versões em execução
+  ansible.builtin.debug:
+    msg:
+      - "API      : {{ api_image }} ({{ api_info.container.Image[7:19] }})"
+      - "Frontend : {{ frontend_image }} ({{ frontend_info.container.Image[7:19] }})"

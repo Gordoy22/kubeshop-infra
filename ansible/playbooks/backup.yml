@@ -1,0 +1,14 @@
+---
+# Backup sob demanda (o mesmo script do backup diário automatizado).
+- name: Executar backup do MongoDB
+  hosts: db
+  become: true
+  tasks:
+    - name: Executar kubeshop-backup (mongodump -> S3)
+      ansible.builtin.command: /usr/local/bin/kubeshop-backup
+      register: backup_run
+      changed_when: true
+
+    - name: Resultado do backup
+      ansible.builtin.debug:
+        msg: "{{ backup_run.stdout_lines | select('match', '^BACKUP_') | list }}"

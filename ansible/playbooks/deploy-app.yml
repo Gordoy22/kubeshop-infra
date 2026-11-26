@@ -1,0 +1,14 @@
+---
+# Usado pelo CI/CD da aplicação: atualiza SOMENTE os contêineres para a nova tag,
+# sem tocar na infraestrutura nem no banco.
+- name: Atualizar contêineres da aplicação
+  hosts: app
+  become: true
+  roles:
+    - role: containers
+
+- name: Verificar o ambiente após a atualização
+  hosts: all
+  become: true
+  roles:
+    - role: verify

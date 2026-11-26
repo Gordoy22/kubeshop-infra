@@ -1,0 +1,57 @@
+---
+- name: Normalizar extra_packages (texto "a, b, c" ou lista)
+  ansible.builtin.set_fact:
+    packages_extras: >-
+      {{ (extra_packages.split(',') | map('trim') | select | list)
+         if extra_packages is string else (extra_packages | default([])) }}
+
+- name: Validar nomes dos pacotes adicionais
+  ansible.builtin.assert:
+    that: item is match('^[a-z0-9][a-z0-9+.-]*$')
+    fail_msg: "Nome de pacote inválido em extra_packages: {{ item }}"
+    quiet: true
+  loop: "{{ packages_extras }}"
+
+- name: Instalar pacotes base e adicionais (uma transação apt)
+  ansible.builtin.apt:
+    name: "{{ base_packages + packages_extras }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+
+- name: Garantir serviço de sincronização de horário
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+    lock_timeout: 300
+
+- name: Criar diretório de configuração do timesyncd
+  ansible.builtin.file:
+    path: /etc/systemd/timesyncd.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Amazon Time Sync (link-local): funciona inclusive na VM do banco, que não tem saída UDP/123.
+- name: Usar o Amazon Time Sync Service como fonte de horário
+  ansible.builtin.copy:
+    dest: /etc/systemd/timesyncd.conf.d/10-aws.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Time]
+      NTP=169.254.169.123
+  notify: Reiniciar timesyncd
+
+- name: Garantir timesyncd ativo
+  ansible.builtin.service:
+    name: systemd-timesyncd
+    state: started
+    enabled: true
+
+- name: Registrar pacotes adicionais aplicados
+  ansible.builtin.debug:
+    msg: "Pacotes adicionais garantidos: {{ packages_extras | join(', ') if packages_extras else '(nenhum)' }}"

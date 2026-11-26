@@ -1,0 +1,52 @@
+---
+# A VM da aplicação encaminha (NAT) apenas o tráfego de SAÍDA da sub-rede privada,
+# para que a VM do banco baixe atualizações e imagens sem ter IP público.
+# Nada da internet consegue iniciar conexão com o banco.
+- name: Habilitar encaminhamento IPv4 (persistente)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/90-kubeshop-nat.conf
+    state: present
+    reload: true
+
+- name: Instalar script de NAT
+  ansible.builtin.template:
+    src: kubeshop-nat.sh.j2
+    dest: /usr/local/sbin/kubeshop-nat.sh
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Reaplicar NAT
+
+- name: Instalar serviço systemd de NAT (reaplica após boot e após reinício do Docker)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/kubeshop-nat.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=KubeShop - NAT da sub-rede privada ({{ private_subnet_cidr }})
+      Wants=network-online.target
+      After=network-online.target docker.service
+      PartOf=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/kubeshop-nat.sh
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Reaplicar NAT
+
+- name: Garantir serviço de NAT habilitado e ativo
+  ansible.builtin.systemd_service:
+    name: kubeshop-nat.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Aplicar handlers de NAT antes de configurar a VM do banco
+  ansible.builtin.meta: flush_handlers

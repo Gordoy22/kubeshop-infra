@@ -1,0 +1,9 @@
+---
+profile: basic
+exclude_paths:
+  - collections/
+  - inventory/hosts.yml
+skip_list:
+  - var-naming[no-role-prefix]  # variáveis compartilhadas entre roles via group_vars
+  - yaml[line-length]
+  - name[template]

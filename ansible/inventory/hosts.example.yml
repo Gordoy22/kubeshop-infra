@@ -1,0 +1,27 @@
+---
+# Exemplo do inventário. O arquivo real (inventory/hosts.yml) é GERADO pela pipeline
+# a partir dos outputs do Terraform (scripts/gen-inventory.sh) e não é versionado.
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/kubeshop
+    env_name: dev
+    aws_region: us-east-1
+    db_private_ip: 10.20.2.10
+    private_subnet_cidr: 10.20.2.0/24
+    backup_bucket: kubeshop-backups-123456789012-us-east-1
+    db_data_volume_id: vol-0123456789abcdef0
+    app_public_ip: 203.0.113.10
+  children:
+    app:
+      hosts:
+        kubeshop-dev-app:
+          ansible_host: 203.0.113.10
+    db:
+      hosts:
+        kubeshop-dev-db:
+          ansible_host: 10.20.2.10
+          # Acesso ao banco SOMENTE pelo salto na VM da aplicação (sem IP público).
+          ansible_ssh_common_args: >-
+            -o ProxyCommand="ssh -W %h:%p -q -i ~/.ssh/kubeshop
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@203.0.113.10"

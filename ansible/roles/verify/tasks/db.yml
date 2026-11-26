@@ -1,0 +1,46 @@
+---
+- name: Conferir contêiner MongoDB em execução e saudável
+  community.docker.docker_container_info:
+    name: mongodb
+  register: verify_mongo
+  failed_when: >-
+    not verify_mongo.exists or
+    verify_mongo.container.State.Health.Status | default('') != 'healthy'
+
+- name: Listar portas em escuta na VM do banco
+  ansible.builtin.command: ss -Hltn
+  register: verify_listen
+  changed_when: false
+
+- name: Porta 27017 publicada somente no IP privado (nunca em 0.0.0.0)
+  ansible.builtin.assert:
+    that:
+      - verify_listen.stdout is search(db_private_ip | regex_escape ~ ':27017')
+      - verify_listen.stdout is not search('0\.0\.0\.0:27017')
+      - verify_listen.stdout is not search('\[::\]:27017')
+    fail_msg: "27017 está exposta fora do IP privado: {{ verify_listen.stdout_lines }}"
+    quiet: true
+
+- name: Volume de dados montado
+  ansible.builtin.command: findmnt -n -o SOURCE,SIZE,USED {{ mongo_data_mount }}
+  register: verify_mount
+  changed_when: false
+
+- name: Contar pedidos persistidos
+  ansible.builtin.command: docker exec mongodb mongosh --quiet --file /opt/count-orders.js
+  register: verify_orders
+  changed_when: false
+
+- name: Timer do backup diário ativo
+  ansible.builtin.command: systemctl is-active kubeshop-backup.timer
+  register: verify_timer
+  changed_when: false
+
+- name: Resumo da verificação do banco
+  ansible.builtin.debug:
+    msg:
+      - "MongoDB             : healthy ({{ mongo_image }}:{{ mongo_tag }})"
+      - "Escuta 27017        : somente {{ db_private_ip }}"
+      - "Volume de dados     : {{ verify_mount.stdout }}"
+      - "Pedidos persistidos : {{ verify_orders.stdout_lines | last }}"
+      - "Timer de backup     : {{ verify_timer.stdout }}"

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# KubeShop - backup do MongoDB (gerenciado pelo Ansible).
+# Gera um mongodump compactado do banco kubeshop, um arquivo de metadados
+# (quantidade de pedidos e SHA-256) e envia ambos ao S3 em <ambiente>/.
+# A senha é lida de um arquivo montado no contêiner (--config): não aparece no log.
+# shellcheck disable=SC2154  # variáveis vêm de /etc/kubeshop/backup.env
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/kubeshop/backup.env
+export AWS_REGION AWS_DEFAULT_REGION
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+NAME="kubeshop-${ENV_NAME}-${TS}"
+ARCHIVE="${LOCAL_DIR}/${NAME}.archive.gz"
+META="${LOCAL_DIR}/${NAME}.json"
+umask 077
+
+ORDERS="$(docker exec mongodb mongosh --quiet --file /opt/count-orders.js | tail -n1)"
+
+docker exec mongodb mongodump \
+  --config=/run/secrets/mongotools.yaml \
+  --username "${MONGO_ROOT_USER}" --authenticationDatabase admin \
+  --db "${MONGO_DATABASE}" --archive --gzip --quiet > "${ARCHIVE}"
+
+SIZE="$(stat -c %s "${ARCHIVE}")"
+SHA="$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)"
+cat > "${META}" <<EOF
+{"name":"${NAME}","environment":"${ENV_NAME}","createdAt":"${TS}","database":"${MONGO_DATABASE}","orders":${ORDERS},"bytes":${SIZE},"sha256":"${SHA}"}
+EOF
+
+aws s3 cp "${ARCHIVE}" "s3://${BACKUP_BUCKET}/${ENV_NAME}/${NAME}.archive.gz" --only-show-errors
+aws s3 cp "${META}" "s3://${BACKUP_BUCKET}/${ENV_NAME}/${NAME}.json" --only-show-errors \
+  --content-type application/json
+
+# Retenção local curta (a retenção principal é a lifecycle do S3).
+find "${LOCAL_DIR}" -type f -name 'kubeshop-*' -mtime +"${LOCAL_RETENTION_DAYS}" -delete
+
+echo "BACKUP_OK key=${ENV_NAME}/${NAME}.archive.gz orders=${ORDERS} bytes=${SIZE} sha256=${SHA}"

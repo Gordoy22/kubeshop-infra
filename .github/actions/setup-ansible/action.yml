@@ -1,0 +1,45 @@
+name: Preparar Ansible e acesso às VMs
+description: Instala Ansible + collections, grava a chave SSH, abre SSH temporário para o runner e gera o inventário.
+
+inputs:
+  ssh-private-key:
+    description: Chave privada SSH administrativa (secret)
+    required: true
+  outputs-file:
+    description: Arquivo JSON com os outputs do Terraform
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Instalar Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
+    - name: Instalar Ansible e collections
+      shell: bash
+      run: |
+        python -m pip install --quiet "ansible-core>=2.18,<2.19"
+        ansible-galaxy collection install -r ansible/requirements.yml -p ansible/collections
+        ansible --version | head -n1
+
+    - name: Gravar chave SSH (somente neste runner, permissão 600)
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        if [[ -z "$SSH_KEY" ]]; then echo "::error::Secret SSH_PRIVATE_KEY ausente"; exit 1; fi
+        install -m 700 -d ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/kubeshop
+        chmod 600 ~/.ssh/kubeshop
+
+    - name: Liberar SSH temporário para o IP deste runner
+      shell: bash
+      run: bash scripts/runner-access.sh open "$(jq -r .app_security_group_id.value '${{ inputs.outputs-file }}')"
+
+    - name: Gerar inventário a partir dos outputs do Terraform
+      shell: bash
+      run: |
+        bash scripts/gen-inventory.sh '${{ inputs.outputs-file }}' ansible/inventory/hosts.yml "$HOME/.ssh/kubeshop"
+        cat ansible/inventory/hosts.yml

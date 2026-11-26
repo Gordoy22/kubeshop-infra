@@ -1,0 +1,364 @@
+# =============================================================================
+# 2 · INFRA - PROVISIONAR / ATUALIZAR  (pipeline principal do PM-04)
+# Execução manual com parâmetros. Sequência:
+#   imagens (garante que existam) -> Terraform (init/fmt/validate/plan/apply)
+#   -> Ansible (SO, pacotes, Docker, MongoDB, contêineres) -> testes -> evidências
+# Interrompe na primeira falha. Nenhum segredo é impresso (GitHub mascara e o Ansible usa no_log).
+# =============================================================================
+name: "2 · Infra - Provisionar / Atualizar"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente de destino"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      run_mode:
+        description: "plan = só validar e mostrar o plano | apply = aplicar Terraform + Ansible"
+        type: choice
+        options: [apply, plan]
+        default: apply
+      instance_name:
+        description: "Prefixo do nome das VMs (gera <nome>-<ambiente>-app / -db)"
+        type: string
+        default: kubeshop
+      instance_type:
+        description: "Tipo da VM da APLICAÇÃO (ex.: t3.micro, t3.small)"
+        type: string
+        default: t3.micro
+      db_instance_type:
+        description: "Tipo da VM do BANCO (ex.: t3.small, t3.medium)"
+        type: string
+        default: t3.small
+      db_volume_gb:
+        description: "Tamanho do disco de dados do MongoDB em GiB (só aumenta)"
+        type: string
+        default: "10"
+      docker_image:
+        description: "Prefixo da imagem (vazio = ghcr.io/<dono-do-repo>/kubeshop -> -api / -frontend)"
+        type: string
+        default: ""
+      docker_tag:
+        description: "Tag/versão das imagens da aplicação"
+        type: string
+        default: "1.0.0"
+      update_os:
+        description: "Aplicar atualizações do sistema operacional"
+        type: boolean
+        default: false
+      extra_packages:
+        description: "Pacotes adicionais separados por vírgula (ex.: htop, tree)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: kubeshop-infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  ANSIBLE_FORCE_COLOR: "1"
+  PY_COLORS: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  params:
+    name: Validar parâmetros
+    runs-on: ubuntu-24.04
+    outputs:
+      docker_image: ${{ steps.p.outputs.docker_image }}
+      default_image: ${{ steps.p.outputs.default_image }}
+    steps:
+      - name: Validar e normalizar parâmetros
+        id: p
+        env:
+          I_NAME: ${{ inputs.instance_name }}
+          I_TYPE: ${{ inputs.instance_type }}
+          D_TYPE: ${{ inputs.db_instance_type }}
+          D_GB: ${{ inputs.db_volume_gb }}
+          IMG: ${{ inputs.docker_image }}
+          TAG: ${{ inputs.docker_tag }}
+          PKGS: ${{ inputs.extra_packages }}
+        run: |
+          set -euo pipefail
+          err() { echo "::error title=Parâmetro inválido::$1"; exit 1; }
+          [[ "$I_NAME" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || err "instance_name"
+          [[ "$I_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] || err "instance_type"
+          [[ "$D_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] || err "db_instance_type"
+          [[ "$D_GB" =~ ^[0-9]{1,3}$ ]] || err "db_volume_gb"
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || err "docker_tag"
+          [[ "$PKGS" =~ ^[a-z0-9+.,\ -]*$ ]] || err "extra_packages"
+          DEFAULT="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeshop"
+          IMG="${IMG:-$DEFAULT}"
+          [[ "$IMG" =~ ^[a-z0-9]+([._/:-][a-z0-9]+)*$ ]] || err "docker_image"
+          echo "docker_image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "default_image=$([[ "$IMG" == "$DEFAULT" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Parâmetros da execução"
+            echo "| Parâmetro | Valor |"; echo "|---|---|"
+            echo "| environment | \`${{ inputs.environment }}\` |"
+            echo "| run_mode | \`${{ inputs.run_mode }}\` |"
+            echo "| instance_name | \`$I_NAME\` |"
+            echo "| instance_type (app) | \`$I_TYPE\` |"
+            echo "| db_instance_type | \`$D_TYPE\` |"
+            echo "| db_volume_gb | \`$D_GB\` |"
+            echo "| docker_image | \`$IMG\` |"
+            echo "| docker_tag | \`$TAG\` |"
+            echo "| update_os | \`${{ inputs.update_os }}\` |"
+            echo "| extra_packages | \`${PKGS:-(nenhum)}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  images:
+    name: Verificar imagens da aplicação
+    needs: params
+    runs-on: ubuntu-24.04
+    outputs:
+      build_needed: ${{ steps.check.outputs.build_needed }}
+    steps:
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Conferir se as imagens da tag existem
+        id: check
+        env:
+          IMG: ${{ needs.params.outputs.docker_image }}
+          TAG: ${{ inputs.docker_tag }}
+          DEFAULT_IMAGE: ${{ needs.params.outputs.default_image }}
+        run: |
+          MISSING=0
+          for S in api frontend; do
+            if docker manifest inspect "$IMG-$S:$TAG" >/dev/null 2>&1; then
+              echo "Imagem encontrada: $IMG-$S:$TAG"
+            else
+              echo "Imagem ausente:    $IMG-$S:$TAG"; MISSING=1
+            fi
+          done
+          if [[ "$MISSING" == 1 && "$DEFAULT_IMAGE" != "true" ]]; then
+            echo "::error::Imagem externa ausente: $IMG-{api,frontend}:$TAG"; exit 1
+          fi
+          echo "build_needed=$([[ "$MISSING" == 1 && "${{ inputs.run_mode }}" == apply ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Construir imagens ausentes (CI/CD da aplicação)
+    needs: images
+    if: needs.images.outputs.build_needed == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/app-cicd.yml
+    with:
+      image_tag: ${{ inputs.docker_tag }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  terraform:
+    name: Terraform (${{ inputs.environment }})
+    needs: [params, images, build]
+    if: >-
+      always() && needs.params.result == 'success' && needs.images.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    env:
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_instance_name: ${{ inputs.instance_name }}
+      TF_VAR_app_instance_type: ${{ inputs.instance_type }}
+      TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+      TF_VAR_db_data_volume_gb: ${{ inputs.db_volume_gb }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      TF_VAR_admin_cidrs: ${{ vars.ADMIN_CIDRS || '[]' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preparar AWS, Terraform e backend do state
+        uses: ./.github/actions/setup-infra
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          tf-state-bucket: ${{ vars.TF_STATE_BUCKET }}
+
+      - name: Derivar chave pública SSH a partir do secret
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          [[ -n "$SSH_KEY" ]] || { echo "::error::Secret SSH_PRIVATE_KEY ausente"; exit 1; }
+          umask 077; printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/k"
+          echo "TF_VAR_ssh_public_key=$(ssh-keygen -y -f "$RUNNER_TEMP/k")" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/k"
+
+      - name: Terraform fmt (verificação de formatação)
+        run: terraform fmt -check -recursive terraform
+
+      # ---- Stack global (bucket de backups, sobrevive à desativação de ambientes)
+      - name: "Global: init"
+        run: bash scripts/tf-init.sh global
+      - name: "Global: validate + plan"
+        run: |
+          terraform -chdir=terraform/global validate
+          terraform -chdir=terraform/global plan -out=global.tfplan -var="aws_region=$AWS_REGION"
+      - name: "Global: apply"
+        if: inputs.run_mode == 'apply'
+        run: terraform -chdir=terraform/global apply -auto-approve global.tfplan
+
+      # ---- Stack do ambiente (VPC, VMs, SGs, volume, IAM)
+      - name: "Ambiente: init (state kubeshop/${{ inputs.environment }})"
+        run: bash scripts/tf-init.sh environment "${{ inputs.environment }}"
+      - name: "Ambiente: validate"
+        run: terraform -chdir=terraform/environment validate
+      - name: "Ambiente: plan"
+        id: plan
+        run: |
+          set +e
+          terraform -chdir=terraform/environment plan -detailed-exitcode -out=env.tfplan -no-color | tee plan.txt
+          CODE=${PIPESTATUS[0]}
+          set -e
+          [[ $CODE == 1 ]] && { echo "::error::terraform plan falhou"; exit 1; }
+          echo "changes=$([[ $CODE == 2 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Terraform plan (${{ inputs.environment }})"
+            if [[ $CODE == 0 ]]; then echo "**Sem alterações** — infraestrutura já está no estado desejado."; fi
+            grep -E '^(Plan:|No changes|  # )' plan.txt | sed 's/^/    /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: "Ambiente: apply"
+        if: inputs.run_mode == 'apply' && steps.plan.outputs.changes == 'true'
+        run: terraform -chdir=terraform/environment apply -auto-approve -no-color env.tfplan | tee apply.txt
+      - name: "Ambiente: outputs"
+        if: inputs.run_mode == 'apply'
+        run: |
+          terraform -chdir=terraform/environment output -json > tf-outputs.json
+          {
+            echo "## Inventário dos recursos"
+            echo '```json'; jq '.inventory.value' tf-outputs.json; echo '```'
+            echo "**Loja:** $(jq -r .store_url.value tf-outputs.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Guardar evidências do Terraform
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-${{ inputs.environment }}-${{ github.run_number }}
+          path: |
+            plan.txt
+            apply.txt
+            tf-outputs.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  ansible:
+    name: Ansible (${{ inputs.environment }})
+    needs: [params, terraform]
+    if: always() && inputs.run_mode == 'apply' && needs.params.result == 'success' && needs.terraform.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baixar outputs do Terraform
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-${{ inputs.environment }}-${{ github.run_number }}
+
+      - name: Autenticar na AWS
+        uses: ./.github/actions/setup-infra
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          tf-state-bucket: ${{ vars.TF_STATE_BUCKET }}
+
+      - name: Preparar Ansible, SSH temporário e inventário
+        uses: ./.github/actions/setup-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          outputs-file: tf-outputs.json
+
+      - name: Validar sintaxe do playbook
+        working-directory: ansible
+        run: ansible-playbook playbook.yml --syntax-check
+
+      - name: Executar playbook (SO, pacotes, Docker, MongoDB, contêineres)
+        working-directory: ansible
+        env:
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          P_IMAGE: ${{ needs.params.outputs.docker_image }}
+          P_TAG: ${{ inputs.docker_tag }}
+          P_UPDATE_OS: ${{ inputs.update_os }}
+          P_PKGS: ${{ inputs.extra_packages }}
+        run: |
+          set -o pipefail
+          jq -n --arg img "$P_IMAGE" --arg tag "$P_TAG" --arg pk "$P_PKGS" \
+                --argjson up "$P_UPDATE_OS" \
+                '{docker_image:$img, docker_tag:$tag, update_os:$up, extra_packages:$pk}' > "$RUNNER_TEMP/extra.json"
+          cat "$RUNNER_TEMP/extra.json"
+          ansible-playbook playbook.yml -e "@$RUNNER_TEMP/extra.json" 2>&1 | tee ../ansible.log
+
+      - name: Resumo do Ansible (PLAY RECAP)
+        if: always()
+        run: |
+          [[ -f ansible.log ]] || exit 0
+          sed -n '/PLAY RECAP/,/^$/p' ansible.log | sed 's/\x1b\[[0-9;]*m//g' > recap.txt
+          {
+            echo "## Ansible — PLAY RECAP"
+            echo '```'; cat recap.txt; echo '```'
+            if grep -Eq 'changed=[1-9]' recap.txt; then
+              echo "Houve alterações de configuração nesta execução."
+            else
+              echo "**Idempotente:** nenhuma alteração (changed=0 em todos os hosts)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Teste funcional pela internet (somente leitura)
+        run: bash scripts/smoke.sh "$(jq -r .store_url.value tf-outputs.json)" | tee smoke.txt
+
+      - name: Teste de isolamento do banco
+        run: bash scripts/isolation-test.sh tf-outputs.json | tee isolation.txt
+
+      - name: Publicar resumo dos testes
+        if: always()
+        run: |
+          {
+            echo "## Testes"
+            echo '```'; cat smoke.txt isolation.txt 2>/dev/null || true; echo '```'
+            echo "### Loja disponível em: $(jq -r .store_url.value tf-outputs.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fechar SSH temporário do runner
+        if: always()
+        run: |
+          [[ -f tf-outputs.json ]] || exit 0
+          bash scripts/runner-access.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)"
+
+      - name: Guardar evidências do Ansible
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ansible-${{ inputs.environment }}-${{ github.run_number }}
+          path: |
+            ansible.log
+            recap.txt
+            smoke.txt
+            isolation.txt
+          if-no-files-found: ignore
+          retention-days: 90

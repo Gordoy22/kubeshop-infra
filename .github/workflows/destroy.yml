@@ -1,0 +1,160 @@
+# =============================================================================
+# 9 · INFRA - DESATIVAR (AÇÃO DESTRUTIVA)
+# Remove VMs, rede, volume de dados e IAM do ambiente escolhido.
+# Antes, executa um backup final para o S3. O bucket de backups (stack global),
+# o bucket do state e as imagens no GHCR são PRESERVADOS (ver docs/03-manual-operacao.md).
+# =============================================================================
+name: "9 · Infra - Desativar ambiente (DESTRUTIVO)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente a desativar"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      confirmation:
+        description: "Digite exatamente DESTRUIR-<ambiente> (ex.: DESTRUIR-dev)"
+        type: string
+        required: true
+      final_backup:
+        description: "Fazer backup final do banco para o S3 antes de destruir"
+        type: boolean
+        default: true
+      remove_backup_bucket:
+        description: "TAMBÉM apagar o bucket de backups de TODOS os ambientes (irreversível)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: kubeshop-infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  destroy:
+    name: Desativar ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    env:
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - name: Conferir confirmação
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED: DESTRUIR-${{ inputs.environment }}
+        run: |
+          if [[ "$CONFIRMATION" != "$EXPECTED" ]]; then
+            echo "::error title=Confirmação incorreta::Digite exatamente $EXPECTED"; exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Preparar AWS, Terraform e backend do state
+        uses: ./.github/actions/setup-infra
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          tf-state-bucket: ${{ vars.TF_STATE_BUCKET }}
+
+      - name: Ler outputs e parâmetros atuais do ambiente
+        id: current
+        run: |
+          bash scripts/tf-init.sh environment "${{ inputs.environment }}"
+          terraform -chdir=terraform/environment output -json > tf-outputs.json
+          if jq -e '.app_public_ip.value' tf-outputs.json >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            # Reaproveita os valores atuais para que o plano de destruição não dependa de parâmetros.
+            echo "TF_VAR_instance_name=$(jq -r '.inventory.value.app_vm.name' tf-outputs.json | sed "s/-${{ inputs.environment }}-app$//")" >> "$GITHUB_ENV"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Ambiente sem recursos no state."
+          fi
+
+      - name: Derivar chave pública SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          umask 077; printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/k"
+          echo "TF_VAR_ssh_public_key=$(ssh-keygen -y -f "$RUNNER_TEMP/k")" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/k"
+
+      - name: Preparar Ansible para o backup final
+        if: inputs.final_backup && steps.current.outputs.exists == 'true'
+        uses: ./.github/actions/setup-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          outputs-file: tf-outputs.json
+
+      - name: Backup final do banco para o S3
+        if: inputs.final_backup && steps.current.outputs.exists == 'true'
+        working-directory: ansible
+        run: ansible-playbook playbooks/backup.yml 2>&1 | tee ../final-backup.log
+
+      - name: Fechar SSH temporário
+        if: always() && inputs.final_backup && steps.current.outputs.exists == 'true'
+        run: bash scripts/runner-access.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)" || true
+
+      - name: Plano de destruição
+        if: steps.current.outputs.exists == 'true'
+        run: terraform -chdir=terraform/environment plan -destroy -out=destroy.tfplan -no-color | tee destroy-plan.txt
+
+      - name: Destruir recursos do ambiente
+        if: steps.current.outputs.exists == 'true'
+        run: terraform -chdir=terraform/environment apply -auto-approve -no-color destroy.tfplan | tee destroy.txt
+
+      - name: Apagar bucket de backups (opcional, todos os ambientes)
+        if: inputs.remove_backup_bucket
+        run: |
+          bash scripts/tf-init.sh global
+          terraform -chdir=terraform/global apply -auto-approve -var="aws_region=$AWS_REGION" -var="force_destroy_backups=true"
+          terraform -chdir=terraform/global destroy -auto-approve -var="aws_region=$AWS_REGION" -var="force_destroy_backups=true"
+
+      - name: Relatório da desativação
+        if: always()
+        run: |
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          {
+            echo "## Desativação — ${{ inputs.environment }}"
+            grep -E '^(Plan:|Destroy complete)' destroy-plan.txt destroy.txt 2>/dev/null || echo "Nada a destruir."
+            grep -h 'BACKUP_OK' final-backup.log 2>/dev/null | sed 's/^/Backup final: /' || true
+            echo ""
+            echo "### O que foi removido"
+            echo "- VMs app/db, Elastic IP, VPC, sub-redes, rotas, Security Groups, endpoint S3, IAM do banco"
+            echo "- **Volume EBS com os dados do MongoDB** (os dados permanecem apenas nos backups do S3)"
+            echo ""
+            echo "### O que CONTINUA existindo (e gerando custo mínimo)"
+            if [[ "${{ inputs.remove_backup_bucket }}" == "true" ]]; then
+              echo "- Bucket de backups: **removido**"
+            else
+              echo "- Bucket de backups \`kubeshop-backups-${ACCOUNT}-${AWS_REGION}\` (expiração automática em 30 dias)"
+            fi
+            echo "- Bucket do Terraform State \`${TF_STATE_BUCKET}\` (centavos/mês; permite recriar o ambiente)"
+            echo "- Imagens no GitHub Container Registry"
+            echo ""
+            echo "Para recriar: pipeline **2 · Infra - Provisionar / Atualizar** e depois **3 · Operação → restore**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar evidências
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: destroy-${{ inputs.environment }}-${{ github.run_number }}
+          path: |
+            destroy-plan.txt
+            destroy.txt
+            final-backup.log
+          if-no-files-found: ignore
+          retention-days: 90

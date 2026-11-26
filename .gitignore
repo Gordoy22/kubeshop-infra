@@ -1,0 +1,33 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*.auto.tfvars
+terraform.tfvars
+
+# Ansible
+ansible/inventory/hosts.yml
+ansible/collections/
+*.retry
+
+# Segredos e chaves (NUNCA versionar)
+.env
+.env.*
+.secrets/
+*.pem
+*.key
+id_*
+**/secrets.auto.*
+
+# Saídas locais de execução
+plan.txt
+apply.txt
+tf-outputs.json
+ansible.log
+ops.log
+*.log

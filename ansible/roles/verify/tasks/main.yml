@@ -1,0 +1,18 @@
+---
+# Verificações somente-leitura (não alteram nada: aparecem como "ok").
+- name: Coletar estado dos serviços
+  ansible.builtin.service_facts:
+
+- name: Conferir serviço Docker em execução
+  ansible.builtin.assert:
+    that: ansible_facts.services['docker.service'].state == 'running'
+    fail_msg: "Docker não está em execução em {{ inventory_hostname }}"
+    quiet: true
+
+- name: Verificações da VM da aplicação
+  ansible.builtin.include_tasks: app.yml
+  when: "'app' in group_names"
+
+- name: Verificações da VM do banco
+  ansible.builtin.include_tasks: db.yml
+  when: "'db' in group_names"

@@ -1,0 +1,70 @@
+name: Preparar ferramentas de infraestrutura
+description: Autentica na AWS (OIDC ou chaves), instala Terraform e garante o backend do state.
+
+inputs:
+  aws-region:
+    description: Região AWS
+    required: true
+  aws-role-arn:
+    description: ARN do papel IAM para OIDC (opcional; preferido)
+    required: false
+    default: ""
+  aws-access-key-id:
+    description: Access key (usada quando não há OIDC)
+    required: false
+    default: ""
+  aws-secret-access-key:
+    description: Secret key (usada quando não há OIDC)
+    required: false
+    default: ""
+  tf-state-bucket:
+    description: Nome do bucket do state (vazio = automático)
+    required: false
+    default: ""
+  terraform-version:
+    description: Versão do Terraform
+    required: false
+    default: "1.17.2"
+
+runs:
+  using: composite
+  steps:
+    - name: Verificar credenciais AWS configuradas
+      shell: bash
+      env:
+        ROLE: ${{ inputs.aws-role-arn }}
+        KEY: ${{ inputs.aws-access-key-id }}
+      run: |
+        if [[ -z "$ROLE" && -z "$KEY" ]]; then
+          echo "::error title=Credenciais AWS ausentes::Configure o secret AWS_ROLE_ARN (OIDC) ou AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY. Veja docs/00-passo-a-passo.md"
+          exit 1
+        fi
+
+    - name: Autenticar na AWS via OIDC (sem chaves de longa duração)
+      if: inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: kubeshop-${{ github.run_id }}
+
+    - name: Autenticar na AWS via access key
+      if: inputs.aws-role-arn == ''
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Instalar Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Garantir bucket protegido do Terraform State
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        TF_STATE_BUCKET: ${{ inputs.tf-state-bucket }}
+      run: bash scripts/ensure-backend.sh

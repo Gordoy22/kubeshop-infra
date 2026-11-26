@@ -1,0 +1,48 @@
+---
+# Reinício controlado. Parâmetro service: all | frontend | api | mongodb.
+# Ordem segura: banco -> API -> frontend. Os pedidos ficam no volume EBS (preservados).
+- name: Reiniciar o MongoDB
+  hosts: db
+  become: true
+  vars:
+    service: all
+  tasks:
+    - name: Reiniciar contêiner mongodb
+      ansible.builtin.command: docker restart mongodb
+      changed_when: true
+      when: service in ['all', 'mongodb']
+
+    - name: Aguardar MongoDB saudável
+      community.docker.docker_container_info:
+        name: mongodb
+      register: restart_mongo
+      until: restart_mongo.container.State.Health.Status | default('') == 'healthy'
+      retries: 30
+      delay: 5
+
+- name: Reiniciar a aplicação
+  hosts: app
+  become: true
+  vars:
+    service: all
+  tasks:
+    - name: Reiniciar contêineres da aplicação
+      ansible.builtin.command: docker restart {{ item }}
+      changed_when: true
+      loop: [api, frontend]
+      when: service in ['all', item]
+
+    - name: Aguardar contêineres saudáveis
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      register: restart_app
+      until: restart_app.container.State.Health.Status | default('') == 'healthy'
+      retries: 30
+      delay: 5
+      loop: [api, frontend]
+
+- name: Verificar após o reinício
+  hosts: all
+  become: true
+  roles:
+    - role: verify

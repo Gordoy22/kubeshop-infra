@@ -1,0 +1,79 @@
+---
+# Prepara o volume EBS dedicado aos dados do MongoDB (REQ-05 persistência).
+# Em instâncias Nitro o volume aparece como /dev/nvmeXn1; o link by-id usa o ID do volume.
+- name: Garantir ferramentas de sistema de arquivos XFS
+  ansible.builtin.apt:
+    name: xfsprogs
+    state: present
+    lock_timeout: 300
+
+- name: Calcular o caminho do volume pelo ID do EBS
+  ansible.builtin.set_fact:
+    data_volume_device: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ db_data_volume_id | replace('-', '') }}"
+
+- name: Aguardar o volume de dados aparecer no sistema
+  ansible.builtin.wait_for:
+    path: "{{ data_volume_device }}"
+    timeout: 300
+
+- name: Criar sistema de arquivos XFS (apenas se o volume estiver vazio)
+  community.general.filesystem:
+    dev: "{{ data_volume_device }}"
+    fstype: xfs
+    resizefs: false
+
+- name: Montar o volume em {{ mongo_data_mount }} (persistente no fstab)
+  ansible.posix.mount:
+    path: "{{ mongo_data_mount }}"
+    src: "{{ data_volume_device }}"
+    fstype: xfs
+    opts: defaults,nofail,noatime
+    state: mounted
+
+- name: Expandir o XFS se o volume foi aumentado pelo Terraform
+  ansible.builtin.command: xfs_growfs -d {{ mongo_data_mount }}
+  register: growfs
+  changed_when: "'data blocks changed' in growfs.stdout"
+
+- name: Criar diretórios de dados do MongoDB
+  ansible.builtin.file:
+    path: "{{ mongo_data_mount }}/{{ item }}"
+    state: directory
+    owner: "{{ mongo_uid }}"
+    group: "{{ mongo_uid }}"
+    mode: "0750"
+  loop: [db, configdb]
+
+- name: Criar diretório de drop-in do serviço Docker
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Impede que o Docker suba antes do volume montado (evitaria um banco vazio no disco do SO).
+- name: Exigir o volume de dados montado antes do Docker iniciar
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-kubeshop-data.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      RequiresMountsFor={{ mongo_data_mount }}
+  register: docker_dropin
+
+- name: Recarregar systemd após o drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: docker_dropin is changed
+
+- name: Mostrar uso do volume de dados
+  ansible.builtin.command: df -h {{ mongo_data_mount }}
+  register: data_df
+  changed_when: false
+
+- name: Registrar uso do volume
+  ansible.builtin.debug:
+    msg: "{{ data_df.stdout_lines }}"

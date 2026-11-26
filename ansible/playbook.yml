@@ -1,0 +1,88 @@
+---
+# Playbook principal: prepara as duas VMs do zero e mantém SO, pacotes, Docker e
+# contêineres. Idempotente: na reexecução com os mesmos parâmetros, changed=0.
+#
+# Ordem:
+#   1. VM app : NAT (libera saída da sub-rede privada) + SO + pacotes + SSH + Docker
+#   2. VM db  : SO + pacotes + SSH + Docker + volume EBS + MongoDB + backup
+#   3. VM app : contêineres da aplicação (API conecta no banco pelo IP privado)
+#   4. Todas  : verificação final
+
+- name: Preparar a VM da aplicação (base, NAT e Docker)
+  hosts: app
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Aguardar SSH disponível
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+    - name: Aguardar o cloud-init terminar
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: Coletar fatos do sistema
+      ansible.builtin.setup:
+  roles:
+    - role: nat_instance
+      tags: [nat]
+    - role: os_updates
+      tags: [os]
+    - role: packages
+      tags: [packages]
+    - role: hardening
+      tags: [hardening]
+    - role: docker
+      tags: [docker]
+
+- name: Preparar a VM exclusiva do MongoDB
+  hosts: db
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Aguardar SSH disponível (salto pela VM da aplicação)
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+    - name: Aguardar o cloud-init terminar
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: Coletar fatos do sistema
+      ansible.builtin.setup:
+    - name: Conferir saída para a internet pelo NAT (necessária para apt e imagens)
+      ansible.builtin.uri:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        method: HEAD
+        timeout: 15
+      register: nat_check
+      until: nat_check.status == 200
+      retries: 10
+      delay: 6
+  roles:
+    - role: os_updates
+      tags: [os]
+    - role: packages
+      tags: [packages]
+    - role: hardening
+      tags: [hardening]
+    - role: docker
+      tags: [docker]
+    - role: data_volume
+      tags: [mongodb]
+    - role: mongodb
+      tags: [mongodb]
+    - role: backup
+      tags: [backup]
+
+- name: Implantar os contêineres do KubeShop
+  hosts: app
+  become: true
+  roles:
+    - role: containers
+      tags: [containers]
+
+- name: Verificar o ambiente
+  hosts: all
+  become: true
+  roles:
+    - role: verify
+      tags: [verify]

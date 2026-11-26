@@ -1,0 +1,43 @@
+---
+# Diagnóstico pelos logs. Parâmetros: service (all|frontend|api|mongodb|backup), log_lines.
+- name: Coletar logs do KubeShop
+  hosts: all
+  become: true
+  vars:
+    service: all
+    log_lines: 200
+    logs_map:
+      app: [frontend, api]
+      db: [mongodb]
+  tasks:
+    - name: Definir contêineres deste host
+      ansible.builtin.set_fact:
+        logs_targets: >-
+          {{ (logs_map[group_names | intersect(['app', 'db']) | first])
+             | select('in', ([service] if service != 'all' else ['frontend', 'api', 'mongodb'])) | list }}
+
+    - name: Ler logs dos contêineres
+      ansible.builtin.command: docker logs --timestamps --tail {{ log_lines | int }} {{ item }}
+      loop: "{{ logs_targets }}"
+      register: logs_out
+      changed_when: false
+
+    - name: Exibir logs dos contêineres
+      ansible.builtin.debug:
+        msg: "{{ ['===== ' ~ item.item ~ ' (' ~ inventory_hostname ~ ')'] + item.stdout_lines + item.stderr_lines }}"
+      loop: "{{ logs_out.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Ler histórico do backup automatizado
+      ansible.builtin.command: journalctl -u kubeshop-backup.service --no-pager -n {{ log_lines | int }}
+      register: logs_backup
+      changed_when: false
+      when:
+        - "'db' in group_names"
+        - service in ['all', 'backup', 'mongodb']
+
+    - name: Exibir histórico do backup
+      ansible.builtin.debug:
+        msg: "{{ logs_backup.stdout_lines }}"
+      when: logs_backup is not skipped

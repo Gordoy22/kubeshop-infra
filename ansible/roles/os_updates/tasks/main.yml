@@ -1,0 +1,29 @@
+---
+# Atualiza o SO somente quando a pipeline pede (update_os=true).
+- name: Atualizar pacotes do sistema operacional (dist-upgrade)
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: dist
+    autoremove: true
+    lock_timeout: 300
+  register: os_upgrade
+  when: update_os | bool
+
+- name: Mostrar resumo da atualização do SO
+  ansible.builtin.debug:
+    msg: "Atualização do SO: {{ 'pacotes atualizados' if os_upgrade is changed else 'nada a atualizar' }}"
+  when: update_os | bool
+
+- name: Verificar se o SO pede reinício
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_flag
+  when: update_os | bool
+
+- name: Reiniciar somente se necessário
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+    msg: "Reinicio solicitado apos atualizacao do SO (Ansible/KubeShop)"
+  when:
+    - update_os | bool
+    - reboot_flag.stat.exists | default(false)

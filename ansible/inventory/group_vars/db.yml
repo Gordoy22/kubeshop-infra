@@ -1,0 +1,6 @@
+---
+# VM exclusiva do MongoDB.
+mongo_uid: 999  # usuário "mongodb" da imagem oficial
+backup_local_dir: /var/backups/kubeshop
+backup_local_retention_days: 3
+backup_schedule: "*-*-* 03:00:00"  # diário, 03:00 UTC (00:00 em Brasília)

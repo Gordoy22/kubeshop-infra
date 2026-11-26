@@ -1,0 +1,72 @@
+---
+- name: Conferir NAT da sub-rede privada ativo
+  ansible.builtin.assert:
+    that: ansible_facts.services['kubeshop-nat.service'].status | default('') == 'enabled'
+    fail_msg: "Serviço kubeshop-nat não está habilitado"
+    quiet: true
+
+- name: Conferir contêineres da aplicação em execução e saudáveis
+  community.docker.docker_container_info:
+    name: "{{ item }}"
+  register: verify_app_containers
+  loop: [frontend, api]
+  failed_when: >-
+    not verify_app_containers.exists or
+    verify_app_containers.container.State.Health.Status | default('') != 'healthy'
+
+- name: Página inicial da loja responde (HTML do React via Nginx)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ http_port }}/"
+    return_content: true
+  register: verify_home
+  failed_when: verify_home.status != 200 or 'KubeShop' not in verify_home.content
+
+- name: API pronta e conectada ao banco (GET /api/health/ready)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ http_port }}/api/health/ready"
+    return_content: true
+  register: verify_ready
+  until: verify_ready.status == 200 and verify_ready.json.database | default(false)
+  retries: 10
+  delay: 6
+
+- name: Catálogo disponível (GET /api/products)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ http_port }}/api/products"
+    return_content: true
+  register: verify_products
+  failed_when: verify_products.status != 200 or (verify_products.json.products | length) < 1
+
+- name: Porta do MongoDB acessível a partir da VM da aplicação (rede privada)
+  ansible.builtin.wait_for:
+    host: "{{ db_private_ip }}"
+    port: 27017
+    timeout: 10
+
+# Teste negativo: conexão SEM credenciais deve ser recusada pelo MongoDB.
+- name: MongoDB recusa consultas sem autenticação
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - api
+      - node
+      - -e
+      - >-
+        const {MongoClient}=require('mongodb');
+        const c=new MongoClient('mongodb://{{ db_private_ip }}:27017/kubeshop',{serverSelectionTimeoutMS:4000});
+        c.db('kubeshop').collection('orders').countDocuments()
+        .then(()=>{console.log('ABERTO_SEM_AUTENTICACAO');process.exit(2)})
+        .catch(e=>{console.log('RECUSADO:'+(e.codeName||e.name));process.exit(0)})
+        .finally(()=>c.close());
+  register: verify_noauth
+  changed_when: false
+  failed_when: verify_noauth.rc != 0 or 'RECUSADO' not in verify_noauth.stdout
+
+- name: Resumo da verificação da aplicação
+  ansible.builtin.debug:
+    msg:
+      - "Loja              : OK (HTTP {{ verify_home.status }})"
+      - "API/banco         : {{ verify_ready.json }}"
+      - "Produtos          : {{ verify_products.json.products | length }}"
+      - "Mongo sem senha   : {{ verify_noauth.stdout | trim }}"

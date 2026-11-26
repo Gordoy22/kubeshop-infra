@@ -1,0 +1,107 @@
+---
+# Backup automatizado (mongodump diário -> S3) e rotina de restauração verificada.
+# A VM usa o perfil IAM do Terraform: nenhuma chave AWS é gravada no servidor.
+- name: Baixar AWS CLI v2 oficial (somente se ainda não instalada)
+  ansible.builtin.unarchive:
+    src: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+    dest: /tmp
+    remote_src: true
+    creates: /usr/local/bin/aws
+
+- name: Instalar AWS CLI v2
+  ansible.builtin.command: /tmp/aws/install --update
+  args:
+    creates: /usr/local/bin/aws
+
+- name: Criar diretório local de backups
+  ansible.builtin.file:
+    path: "{{ backup_local_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Criar diretório de configuração
+  ansible.builtin.file:
+    path: /etc/kubeshop
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Gravar configuração do backup (sem segredos)
+  ansible.builtin.copy:
+    dest: /etc/kubeshop/backup.env
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      ENV_NAME={{ env_name }}
+      BACKUP_BUCKET={{ backup_bucket }}
+      AWS_REGION={{ aws_region }}
+      AWS_DEFAULT_REGION={{ aws_region }}
+      LOCAL_DIR={{ backup_local_dir }}
+      LOCAL_RETENTION_DAYS={{ backup_local_retention_days }}
+      MONGO_DATABASE={{ mongo_database }}
+      MONGO_ROOT_USER={{ mongo_root_user }}
+
+- name: Instalar scripts de backup e restauração
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - kubeshop-backup
+    - kubeshop-restore
+
+- name: Instalar serviço e timer systemd do backup diário
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - name: kubeshop-backup.service
+      content: |
+        [Unit]
+        Description=KubeShop - backup do MongoDB para o S3
+        Requires=docker.service
+        After=docker.service
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/kubeshop-backup
+    - name: kubeshop-backup.timer
+      content: |
+        [Unit]
+        Description=KubeShop - agenda do backup diário
+
+        [Timer]
+        OnCalendar={{ backup_schedule }}
+        Persistent=true
+        RandomizedDelaySec=300
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  register: backup_units
+
+- name: Habilitar timer do backup diário
+  ansible.builtin.systemd_service:
+    name: kubeshop-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: "{{ backup_units is changed }}"
+
+- name: Consultar próxima execução agendada
+  ansible.builtin.command: systemctl status kubeshop-backup.timer --no-pager
+  register: backup_timer
+  changed_when: false
+
+- name: Registrar agenda do backup
+  ansible.builtin.debug:
+    msg: "{{ backup_timer.stdout_lines }}"

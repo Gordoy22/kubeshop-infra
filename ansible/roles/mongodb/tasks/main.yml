@@ -1,0 +1,114 @@
+---
+# MongoDB autenticado, em contêiner, com dados no volume EBS dedicado.
+# A porta 27017 é publicada SOMENTE no IP privado (nunca 0.0.0.0) e o
+# Security Group só aceita conexões vindas da VM da aplicação.
+- name: Validar que os segredos do banco foram informados (GitHub Secrets)
+  ansible.builtin.assert:
+    that:
+      - mongo_root_password | length >= 16
+      - mongo_app_password | length >= 16
+    fail_msg: "Defina os secrets MONGO_ROOT_PASSWORD e MONGO_APP_PASSWORD (mínimo 16 caracteres)."
+    quiet: true
+  no_log: true
+
+- name: Verificar se o contêiner MongoDB já existe (evita reinício durante a 1ª inicialização)
+  community.docker.docker_container_info:
+    name: mongodb
+  register: mongo_preexisting
+
+- name: Criar diretórios do projeto
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ kubeshop_dir }}", mode: "0755" }
+    - { path: "{{ kubeshop_dir }}/mongo", mode: "0755" }
+    - { path: "{{ secrets_dir }}", mode: "0711" }
+
+- name: Gravar arquivos de senha do MongoDB (legíveis só pelo usuário do contêiner)
+  ansible.builtin.copy:
+    dest: "{{ secrets_dir }}/{{ item.name }}"
+    content: "{{ item.value }}\n"
+    owner: "{{ mongo_uid }}"
+    group: "{{ mongo_uid }}"
+    mode: "0400"
+  loop:
+    - { name: mongo-root-password, value: "{{ mongo_root_password }}" }
+    - { name: mongo-app-password, value: "{{ mongo_app_password }}" }
+    - { name: mongotools.yaml, value: "password: {{ mongo_root_password | to_json }}" }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  notify: Reiniciar mongodb
+
+- name: Copiar scripts do MongoDB (criação do usuário da aplicação, healthcheck, contagem)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ kubeshop_dir }}/mongo/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - init-app-user.js
+    - healthcheck.js
+    - count-orders.js
+
+- name: Criar rede Docker do banco
+  community.docker.docker_network:
+    name: kubeshop_data
+    state: present
+
+- name: Executar contêiner MongoDB {{ mongo_tag }}
+  community.docker.docker_container:
+    name: mongodb
+    image: "{{ mongo_image }}:{{ mongo_tag }}"
+    pull: missing
+    state: started
+    restart_policy: unless-stopped
+    command: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "{{ mongo_wiredtiger_cache_gb }}"]
+    env:
+      MONGO_INITDB_ROOT_USERNAME: "{{ mongo_root_user }}"
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_DATABASE: "{{ mongo_database }}"
+      MONGO_APP_USERNAME: "{{ mongo_app_user }}"
+      MONGO_APP_PASSWORD_FILE: /run/secrets/mongo_app_password
+    published_ports:
+      - "{{ db_private_ip }}:27017:27017"
+    volumes:
+      - "{{ mongo_data_mount }}/db:/data/db"
+      - "{{ mongo_data_mount }}/configdb:/data/configdb"
+      - "{{ kubeshop_dir }}/mongo/init-app-user.js:/docker-entrypoint-initdb.d/10-app-user.js:ro"
+      - "{{ kubeshop_dir }}/mongo/healthcheck.js:/opt/healthcheck.js:ro"
+      - "{{ kubeshop_dir }}/mongo/count-orders.js:/opt/count-orders.js:ro"
+      - "{{ secrets_dir }}/mongo-root-password:/run/secrets/mongo_root_password:ro"
+      - "{{ secrets_dir }}/mongo-app-password:/run/secrets/mongo_app_password:ro"
+      - "{{ secrets_dir }}/mongotools.yaml:/run/secrets/mongotools.yaml:ro"
+    security_opts:
+      - no-new-privileges:true
+    stop_timeout: 30
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--file", "/opt/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    log_driver: json-file
+    log_options:
+      max-size: "{{ docker_log_max_size }}"
+      max-file: "{{ docker_log_max_file }}"
+    networks:
+      - name: kubeshop_data
+
+- name: Aplicar reinício pendente do MongoDB
+  ansible.builtin.meta: flush_handlers
+
+- name: Aguardar MongoDB saudável (autenticação do usuário da aplicação + ping)
+  community.docker.docker_container_info:
+    name: mongodb
+  register: mongo_info
+  until: mongo_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 30
+  delay: 5

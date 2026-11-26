@@ -1,0 +1,194 @@
+# =============================================================================
+# 3 · OPERAÇÃO - rotinas do dia a dia (não removem recursos)
+#   health        consulta de saúde + recursos das VMs
+#   smoke-test    teste funcional completo (cria 1 pedido fictício e consulta)
+#   logs          logs dos contêineres e do backup (diagnóstico)
+#   restart       reinício controlado (banco -> API -> frontend)
+#   backup        backup sob demanda (mesmo script do backup diário automático)
+#   list-backups  lista os backups disponíveis no S3
+#   restore       restauração verificada (DESTRUTIVA: exige confirm = RESTAURAR)
+#   deploy-app    atualiza só os contêineres para outra tag (usado pelo CI/CD da aplicação)
+# =============================================================================
+name: "3 · Operação - Saúde, Logs, Reinício, Backup e Restauração"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      action:
+        description: "Rotina"
+        type: choice
+        options: [health, smoke-test, logs, restart, backup, list-backups, restore, deploy-app]
+        default: health
+      service:
+        description: "Serviço (logs/restart): all, frontend, api, mongodb, backup"
+        type: choice
+        options: [all, frontend, api, mongodb, backup]
+        default: all
+      log_lines:
+        description: "Linhas de log (logs)"
+        type: string
+        default: "200"
+      backup_key:
+        description: "restore: 'latest' ou a chave mostrada no backup (ex.: dev/kubeshop-dev-20261126T030000Z.archive.gz)"
+        type: string
+        default: latest
+      confirm:
+        description: "restore: digite RESTAURAR para confirmar (substitui os pedidos atuais)"
+        type: string
+        default: ""
+      docker_tag:
+        description: "deploy-app: tag das imagens"
+        type: string
+        default: "1.0.0"
+      docker_image:
+        description: "deploy-app: prefixo da imagem (vazio = ghcr.io/<dono>/kubeshop)"
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      environment: { type: string, required: true }
+      action: { type: string, required: true }
+      docker_tag: { type: string, default: "1.0.0" }
+      docker_image: { type: string, default: "" }
+      service: { type: string, default: all }
+      log_lines: { type: string, default: "200" }
+      backup_key: { type: string, default: latest }
+      confirm: { type: string, default: "" }
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+
+concurrency:
+  group: kubeshop-infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ANSIBLE_FORCE_COLOR: "1"
+
+jobs:
+  ops:
+    name: "${{ inputs.action }} (${{ inputs.environment }})"
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Validar parâmetros
+        env:
+          ACTION: ${{ inputs.action }}
+          CONFIRM: ${{ inputs.confirm }}
+          LINES: ${{ inputs.log_lines }}
+          KEY: ${{ inputs.backup_key }}
+          TAG: ${{ inputs.docker_tag }}
+          IMG: ${{ inputs.docker_image }}
+        run: |
+          set -euo pipefail
+          err() { echo "::error title=Parâmetro inválido::$1"; exit 1; }
+          [[ "$LINES" =~ ^[0-9]{1,4}$ ]] || err "log_lines"
+          [[ "$KEY" == latest || "$KEY" =~ ^[a-z]+/kubeshop-[a-z]+-[0-9]{8}T[0-9]{6}Z\.archive\.gz$ ]] || err "backup_key"
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || err "docker_tag"
+          if [[ "$ACTION" == restore && "$CONFIRM" != RESTAURAR ]]; then
+            err "restore substitui os pedidos atuais: digite RESTAURAR no campo confirm"
+          fi
+          IMG="${IMG:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeshop}"
+          [[ "$IMG" =~ ^[a-z0-9]+([._/:-][a-z0-9]+)*$ ]] || err "docker_image"
+          echo "DOCKER_IMAGE=$IMG" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v5
+
+      - name: Preparar AWS, Terraform e backend do state
+        uses: ./.github/actions/setup-infra
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          tf-state-bucket: ${{ vars.TF_STATE_BUCKET }}
+
+      - name: Ler outputs do ambiente (somente leitura do state)
+        run: |
+          bash scripts/tf-init.sh environment "${{ inputs.environment }}" >/dev/null
+          terraform -chdir=terraform/environment output -json > tf-outputs.json
+          jq -e '.app_public_ip.value' tf-outputs.json >/dev/null \
+            || { echo "::error::Ambiente ${{ inputs.environment }} não está provisionado. Rode o pipeline 2 primeiro."; exit 1; }
+          echo "STORE_URL=$(jq -r .store_url.value tf-outputs.json)" >> "$GITHUB_ENV"
+          echo "BACKUP_BUCKET=$(jq -r .backup_bucket.value tf-outputs.json)" >> "$GITHUB_ENV"
+
+      # ---------- Rotinas que não precisam de SSH
+      - name: Listar backups no S3
+        if: inputs.action == 'list-backups'
+        run: |
+          # shellcheck disable=SC2016  # crases são da consulta JMESPath da AWS CLI
+          {
+            echo "## Backups disponíveis — ${{ inputs.environment }}"
+            echo "| Chave (use em backup_key) | Pedidos | Tamanho | SHA-256 |"; echo "|---|---|---|---|"
+            for J in $(aws s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "${{ inputs.environment }}/" \
+                --query 'Contents[?ends_with(Key, `.json`)].Key' --output text | tr '\t' '\n' | sort -r | head -n 30); do
+              [[ "$J" == None ]] && continue
+              M="$(aws s3 cp "s3://$BACKUP_BUCKET/$J" -)"
+              echo "| \`${J%.json}.archive.gz\` | $(jq -r .orders <<<"$M") | $(jq -r .bytes <<<"$M") B | \`$(jq -r .sha256 <<<"$M" | cut -c1-12)…\` |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Teste funcional completo (cria e consulta pedido fictício)
+        if: inputs.action == 'smoke-test'
+        run: bash scripts/smoke.sh "$STORE_URL" --write | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # ---------- Rotinas via Ansible
+      - name: Preparar Ansible, SSH temporário e inventário
+        if: contains(fromJSON('["health","logs","restart","backup","restore","deploy-app"]'), inputs.action)
+        uses: ./.github/actions/setup-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          outputs-file: tf-outputs.json
+
+      - name: Executar rotina ${{ inputs.action }}
+        if: contains(fromJSON('["health","logs","restart","backup","restore","deploy-app"]'), inputs.action)
+        working-directory: ansible
+        env:
+          ACTION: ${{ inputs.action }}
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          P_SERVICE: ${{ inputs.service }}
+          P_LINES: ${{ inputs.log_lines }}
+          P_KEY: ${{ inputs.backup_key }}
+          P_TAG: ${{ inputs.docker_tag }}
+        run: |
+          set -o pipefail
+          jq -n --arg s "$P_SERVICE" --arg l "$P_LINES" --arg k "$P_KEY" --arg t "$P_TAG" --arg i "$DOCKER_IMAGE" \
+             '{service:$s, log_lines:$l, backup_key:$k, docker_tag:$t, docker_image:$i}' > "$RUNNER_TEMP/extra.json"
+          ansible-playbook "playbooks/${ACTION}.yml" -e "@$RUNNER_TEMP/extra.json" 2>&1 | tee ../ops.log
+
+      - name: Resumo da rotina
+        if: always() && hashFiles('ops.log') != ''
+        run: |
+          {
+            echo "## ${{ inputs.action }} — ${{ inputs.environment }}"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' ops.log | grep -E 'BACKUP_|RESTORE_|Loja +:|API/banco|Produtos +:|Mongo sem senha|MongoDB +:|Escuta 27017|Volume de dados|Pedidos persistidos|Timer de backup|NAMES|kubeshop-|mongo:' || true
+            sed -n '/PLAY RECAP/,/^$/p' ops.log | sed 's/\x1b\[[0-9;]*m//g'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fechar SSH temporário do runner
+        if: always()
+        run: |
+          [[ -f tf-outputs.json ]] && jq -e .app_security_group_id.value tf-outputs.json >/dev/null 2>&1 || exit 0
+          bash scripts/runner-access.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)"
+
+      - name: Guardar evidências
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-${{ inputs.action }}-${{ inputs.environment }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: ops.log
+          if-no-files-found: ignore
+          retention-days: 90
