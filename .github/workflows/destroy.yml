@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
 
@@ -47,7 +47,7 @@ jobs:
     environment: ${{ inputs.environment }}
     env:
       TF_VAR_environment: ${{ inputs.environment }}
-      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-2' }}
     steps:
       - name: Conferir confirmação
         env:

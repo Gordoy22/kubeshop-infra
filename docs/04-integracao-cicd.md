@@ -38,7 +38,7 @@ Para registros privados de terceiros, informe as credenciais de leitura (`REGIST
 | `MONGO_ROOT_PASSWORD` | Secret | 2, 3 | usuário administrador do MongoDB (backup/restore) |
 | `MONGO_APP_PASSWORD` | Secret | 2, 3 | usuário `kubeshop` usado pela API |
 | `GITHUB_TOKEN` | automático | 1, 2, 3 | publicar (pipeline 1) e baixar (VM, temporário) imagens do GHCR |
-| `AWS_REGION` | Variável | todos | região (padrão `us-east-1`) |
+| `AWS_REGION` | Variável | todos | região (padrão `us-east-2`) |
 | `APP_REPOSITORY` | Variável | 1 | repositório do código da aplicação |
 | `ADMIN_CIDRS` | Variável (opcional) | 2 | SSH permanente para IPs da equipe, em formato HCL: `["200.1.2.3/32"]` |
 | `TF_STATE_BUCKET` | Variável (opcional) | 2, 3, 9 | nome do bucket de state, se quiser um nome próprio |

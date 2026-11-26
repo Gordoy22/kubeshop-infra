@@ -33,7 +33,7 @@ O código e o visual não foram alterados. As imagens são construídas com os D
 | Decisão | Escolha | Justificativa |
 |---|---|---|
 | Provedor | **AWS** | Provedor usado nas aulas de Terraform. O plano gratuito com créditos cobre o projeto. Os recursos necessários (VPC, EC2, EBS, S3, IAM) são maduros e têm provider Terraform oficial. |
-| Região | **us-east-1** (N. Virginia) | Menor preço da AWS (sa-east-1 custa cerca de 50% a 60% a mais). A latência a partir do Brasil (cerca de 120 ms) é aceitável para a loja de demonstração. A região é um parâmetro (`AWS_REGION`). |
+| Região | **us-east-2** (Ohio) | Mesmos preços da us-east-1, que é a mais barata da AWS (sa-east-1 custa cerca de 50% a 60% a mais). **Obrigatória nesta conta:** o plano Free da AWS aplica uma política de organização (SCP) que só libera a us-east-2. Isso foi comprovado pelo pipeline **8 · Diagnóstico**, que nega S3, VPC e EIP na us-east-1. A latência a partir do Brasil (cerca de 130 ms) é aceitável para a loja de demonstração. A região é um parâmetro (`AWS_REGION`). |
 | IaC | **Terraform 1.17** + provider `hashicorp/aws ~> 6.0` | Exigência do PM-04. Declarativo, com plano prévio (`plan`), state e atualização in-place. |
 | Configuração | **Ansible** (ansible-core 2.18, `community.docker`) | Exigência do PM-04. Agentless (só SSH e Python, que já vêm no Ubuntu). Idempotente. |
 | Pipelines | **GitHub Actions** | O código já está no GitHub. Execução manual (`workflow_dispatch`) com parâmetros, Secrets, ambientes e artefatos de evidência. Gratuito em repositório público. |
@@ -45,7 +45,7 @@ O código e o visual não foram alterados. As imagens são construídas com os D
 ```mermaid
 flowchart TB
   user([Usuários]) -->|"HTTP 80 · Elastic IP"| app
-  subgraph vpc["VPC kubeshop-dev-vpc · 10.20.0.0/16 · us-east-1a"]
+  subgraph vpc["VPC kubeshop-dev-vpc · 10.20.0.0/16 · us-east-2a"]
     subgraph pub["public 10.20.1.0/24 · rota 0.0.0.0/0 → Internet Gateway"]
       app["kubeshop-dev-app (10.20.1.10)<br/>t3.micro · 20 GiB gp3<br/>frontend :80 → api :3000<br/>NAT p/ sub-rede privada"]
     end
@@ -57,7 +57,7 @@ flowchart TB
   end
   app -->|"27017 (sg-db ← sg-app)"| db
   db --- ebs
-  db -->|backup diário 03:00 UTC| s3e --> bk[("S3 kubeshop-backups-&lt;conta&gt;-us-east-1<br/>versionado · SSE · 30 dias")]
+  db -->|backup diário 03:00 UTC| s3e --> bk[("S3 kubeshop-backups-&lt;conta&gt;-us-east-2<br/>versionado · SSE · 30 dias")]
 ```
 
 ### Recursos (inventário, ACE-02)
@@ -75,8 +75,8 @@ flowchart TB
 | `aws_ebs_volume` + attachment | kubeshop-dev-mongo-data | dados persistentes do MongoDB |
 | `aws_iam_role` + instance profile | kubeshop-dev-db-role | a VM do banco grava backups só no prefixo `dev/` |
 | `aws_key_pair` | kubeshop-dev-admin | chave pública administrativa |
-| `aws_s3_bucket` (stack global) | kubeshop-backups-&lt;conta&gt;-us-east-1 | backups de todos os ambientes |
-| bucket de state (script) | kubeshop-tfstate-&lt;conta&gt;-us-east-1 | Terraform State remoto |
+| `aws_s3_bucket` (stack global) | kubeshop-backups-&lt;conta&gt;-us-east-2 | backups de todos os ambientes |
+| bucket de state (script) | kubeshop-tfstate-&lt;conta&gt;-us-east-2 | Terraform State remoto |
 
 Recursos além das duas VMs e por que foram necessários (REQ-01): o **EIP** dá um endereço fixo à loja, o **volume EBS** separa os dados do disco do SO (persistência), o **S3** guarda backups fora das VMs, o **IAM** dá credencial temporária sem chave na VM e o **endpoint S3** é gratuito e mantém o backup dentro da rede da AWS.
 

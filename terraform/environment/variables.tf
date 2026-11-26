@@ -69,7 +69,7 @@ variable "ssh_public_key" {
 variable "aws_region" {
   description = "Região AWS."
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
 }
 
 variable "project" {

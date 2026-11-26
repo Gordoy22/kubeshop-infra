@@ -4,14 +4,14 @@
 
 | Item | Valor |
 |---|---|
-| Provedor / região | AWS · us-east-1 (N. Virginia) |
+| Provedor / região | AWS · us-east-2 (Ohio) |
 | Moeda | dólar americano (USD). Conversão ilustrativa em BRL no final. |
 | Data de referência | 25/11/2026 |
 | Período | 1 mês = **730 horas**, ambiente ligado 24×7 |
 | Ambientes | **1** (dev). Cada ambiente adicional (homolog, prod) soma o mesmo valor. |
 | Modelo de compra | On-Demand, Linux, sem Reserved Instances ou Savings Plans |
 | Tráfego | até 100 GB/mês de saída para a internet (loja de demonstração) |
-| Fontes | tabelas públicas de preço da AWS: [EC2 On-Demand](https://aws.amazon.com/ec2/pricing/on-demand/), [EBS](https://aws.amazon.com/ebs/pricing/), [VPC/IPv4 público](https://aws.amazon.com/vpc/pricing/), [S3](https://aws.amazon.com/s3/pricing/). Os preços unitários usados são os de tabela para us-east-1. **Antes de apresentar, confira na [AWS Pricing Calculator](https://calculator.aws/)**, porque a AWS pode ter reajustado algum valor. |
+| Fontes | tabelas públicas de preço da AWS: [EC2 On-Demand](https://aws.amazon.com/ec2/pricing/on-demand/), [EBS](https://aws.amazon.com/ebs/pricing/), [VPC/IPv4 público](https://aws.amazon.com/vpc/pricing/), [S3](https://aws.amazon.com/s3/pricing/). Os preços unitários usados são os de tabela para us-east-2. **Antes de apresentar, confira na [AWS Pricing Calculator](https://calculator.aws/)**, porque a AWS pode ter reajustado algum valor. |
 
 ## Composição (configuração padrão)
 

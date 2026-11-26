@@ -6,10 +6,10 @@ all:
     ansible_user: ubuntu
     ansible_ssh_private_key_file: ~/.ssh/kubeshop
     env_name: dev
-    aws_region: us-east-1
+    aws_region: us-east-2
     db_private_ip: 10.20.2.10
     private_subnet_cidr: 10.20.2.0/24
-    backup_bucket: kubeshop-backups-123456789012-us-east-1
+    backup_bucket: kubeshop-backups-123456789012-us-east-2
     db_data_volume_id: vol-0123456789abcdef0
     app_public_ip: 203.0.113.10
   children:

@@ -6,11 +6,11 @@
 #   5. define as variaveis do repositorio (regiao etc.)
 #
 # Uso:  powershell -ExecutionPolicy Bypass -File scripts\windows\setup-github.ps1
-#       [-RepoName kubeshop-infra] [-Visibility public|private] [-Region us-east-1]
+#       [-RepoName kubeshop-infra] [-Visibility public|private] [-Region us-east-2]
 param(
   [string]$RepoName = "kubeshop-infra",
   [ValidateSet("public", "private")][string]$Visibility = "public",
-  [string]$Region = "us-east-1",
+  [string]$Region = "us-east-2",
   [switch]$RotateDbPasswords
 )
 # Comandos externos (gh, git) escrevem avisos no stderr; no PowerShell 5.1 "Stop" os tornaria fatais.

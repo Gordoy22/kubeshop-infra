@@ -6,7 +6,7 @@ documento de escopo (v1.2) e os requisitos do **PM-04 — Projeto Final**.
 - **Aplicação** sem alterações: o código e o visual vêm do repositório original
   [`LaercioMLB/kube-shop-v2`](https://github.com/LaercioMLB/kube-shop-v2), construídos com os
   Dockerfiles dele próprio.
-- **Duas VMs** na AWS (`us-east-1`): VM 1 com o frontend React/Nginx e a API Node.js/Express, e VM 2 **exclusiva** do MongoDB,
+- **Duas VMs** na AWS (`us-east-2`): VM 1 com o frontend React/Nginx e a API Node.js/Express, e VM 2 **exclusiva** do MongoDB,
   em **sub-rede privada sem IP público**.
 - **Terraform** provisiona a rede, as VMs, os Security Groups, o volume EBS de dados, o IAM e o bucket de backups.
   O state fica remoto no S3, com versionamento e lock.
@@ -17,7 +17,7 @@ documento de escopo (v1.2) e os requisitos do **PM-04 — Projeto Final**.
 ```mermaid
 flowchart LR
   U[Usuários<br/>navegador] -- "HTTP :80<br/>Elastic IP" --> APP
-  subgraph AWS["AWS us-east-1 · VPC 10.20.0.0/16"]
+  subgraph AWS["AWS us-east-2 · VPC 10.20.0.0/16"]
     subgraph PUB["Sub-rede pública 10.20.1.0/24"]
       APP["VM 1 · kubeshop-dev-app<br/>t3.micro · Ubuntu 24.04<br/>Docker: frontend (Nginx+React) :80<br/>api (Node/Express) :3000<br/>NAT da sub-rede privada"]
     end
@@ -44,6 +44,7 @@ kubeshop-infra/
 │   │   ├── app-cicd.yml      1 · CI/CD da aplicação (testes, build, GHCR, deploy da tag)
 │   │   ├── infra-deploy.yml  2 · provisionar/atualizar (Terraform → Ansible → testes)
 │   │   ├── ops.yml           3 · saúde, smoke, logs, reinício, backup, restauração
+│   │   ├── aws-check.yml     8 · diagnóstico de permissões da conta AWS
 │   │   └── destroy.yml       9 · desativação (destrutivo, com confirmação)
 │   └── actions/              ações reutilizáveis (AWS/Terraform/backend, Ansible/SSH/inventário)
 ├── terraform/
@@ -82,6 +83,7 @@ kubeshop-infra/
 | **0 · CI** | automático a cada push | — |
 | **1 · App CI/CD** | nova versão da aplicação | `app_ref`, `image_tag`, `deploy_environment` |
 | **2 · Infra** | criar/atualizar ambiente | `environment`, `run_mode` (plan/apply), `instance_name`, `instance_type`, `db_instance_type`, `db_volume_gb`, `docker_image`, `docker_tag`, `update_os`, `extra_packages` |
+| **8 · Diagnóstico** | conta nova ou erro de permissão na AWS | `regions` (testa S3, VPC, EIP, EBS, EC2 e IAM sem criar VMs) |
 | **3 · Operação** | rotinas diárias | `action` (health, smoke-test, logs, restart, backup, list-backups, restore, deploy-app), `service`, `backup_key`, `confirm` |
 | **9 · Desativar** | encerrar ambiente | `environment`, `confirmation` = `DESTRUIR-<amb>`, `final_backup`, `remove_backup_bucket` |
 
