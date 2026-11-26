@@ -31,10 +31,16 @@
   register: verify_orders
   changed_when: false
 
-- name: Timer do backup diário ativo
-  ansible.builtin.command: systemctl is-active kubeshop-backup.timer
+- name: Consultar timer do backup diário
+  ansible.builtin.systemd_service:
+    name: kubeshop-backup.timer
   register: verify_timer
-  changed_when: false
+
+- name: Timer do backup diário ativo
+  ansible.builtin.assert:
+    that: verify_timer.status.ActiveState == 'active'
+    fail_msg: "kubeshop-backup.timer não está ativo"
+    quiet: true
 
 - name: Resumo da verificação do banco
   ansible.builtin.debug:
@@ -43,4 +49,4 @@
       - "Escuta 27017        : somente {{ db_private_ip }}"
       - "Volume de dados     : {{ verify_mount.stdout }}"
       - "Pedidos persistidos : {{ verify_orders.stdout_lines | last }}"
-      - "Timer de backup     : {{ verify_timer.stdout }}"
+      - "Timer de backup     : {{ verify_timer.status.ActiveState }}"
